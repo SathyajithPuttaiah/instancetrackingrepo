@@ -13,9 +13,11 @@ Services Used:
  * [AWS CodeDeploy](https://aws.amazon.com/codedeploy/) for zero downtime deployments of your application(s). 
  * [AWS Lambda](https://aws.amazon.com/lambda/) to process the ec2 instances. 
  * [AWS S3](https://aws.amazon.com/s3/) to store the instance information. 
+ * [AWS SNS](https://aws.amazon.com/sns/) to send notifications to user. 
 
 ### Requirement:
 Create a Cloudformation template which deploys 5 ec2 instances and then a lambda function which read these instances and logs the same in s3 bucket.
+And deploy this using pipeline.
 
 ### Design:
 
@@ -107,6 +109,8 @@ Following the pipeline update stage is the `BuildAndTest` stage. It utilizes Cod
 
 The last step is `CreateUpdateLambda`. It is similar to the second step, however uses a different CloudFormation template to manage the infrastructure.
 This stage uses that template as its deployment target. It uses the [`ParameterOverrides`](http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-action-reference.html) to tell the lambda function where its deployment package (i.e. the ZIP file produced by CodeBuild during the `BuildAndTest` stage) is. And we also need to tell the lambda function also about the `ArtifactsBucket` - that's why it is defined as an Output of the `codepipeline.yaml` template.
+
+Once the process is complete, user will get a email notification(have to subscribe).
 
 ### Screenshots:
 
