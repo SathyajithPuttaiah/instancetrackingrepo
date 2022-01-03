@@ -1,0 +1,10 @@
+{
+    "Parameters": {
+        "pNotifyEmail": "users@xyz.com",
+        "pInstanceType": "t2.micro",
+        "pKeyName": "user-key-pair",
+        "pSSHLocation": "0.0.0.0/0",
+        "pUpdateHash": "1",
+        "pDeploymentPackageKey": "abcd"
+    }
+}

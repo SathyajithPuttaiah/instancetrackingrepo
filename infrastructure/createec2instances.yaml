@@ -1,0 +1,375 @@
+--- 
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "AWS CloudFormation sample template to create Amazon Linux ec2 instances, lambda which logs instance details to a s3 bucket"
+
+Parameters: 
+# All parameters below will be overridden based on config json file/*
+
+  pNotifyEmail:
+    Description: Email address to notify process completion
+    Type: String
+
+  pInstanceType:
+    Description: EC2 instance type
+    Type: String
+
+  pKeyName:
+    Description: Name of an existing EC2 key pair
+    Type: String
+
+#Default: 0.0.0.0/0
+  pSSHLocation:
+    Description: IP address range that can be used to SSH to the EC2 instances
+    Type: String
+
+# The following parameter is set dynamically by AWS CodePipeline
+
+  pArtifactsBucketName:
+    Type: String
+    Description: s3 bucket holding all the artifacts
+
+  pDeploymentPackageKey:
+    Type: String
+    Description: An S3 object key pointing of a ZIP file, an archive of everything that is needed to run the Lambda function. It is the output of the Build stage of the pipeline.
+
+  pUpdateHash:
+    Type: "String"
+
+Conditions: 
+  cCreateTopic: !Not [!Equals [!Ref pNotifyEmail, ""]]
+
+Mappings:
+
+  mAWSInstanceType2Arch:
+    t2.nano:
+      Arch: HVM64
+    t2.micro:
+      Arch: HVM64
+    t2.small:
+      Arch: HVM64
+    t2.medium:
+      Arch: HVM64
+
+  mAWSRegionArch2AMI:
+    us-east-1:
+      PV64: ami-2a69aa47
+      HVM64: ami-6869aa05
+      HVMG2: ami-61e27177
+    us-west-2:
+      PV64: ami-7f77b31f
+      HVM64: ami-7172b611
+      HVMG2: ami-60aa3700
+    us-west-1:
+      PV64: ami-a2490dc2
+      HVM64: ami-31490d51
+      HVMG2: ami-4b694d2b
+    eu-west-1:
+      PV64: ami-4cdd453f
+      HVM64: ami-f9dd458a
+      HVMG2: ami-2955524f
+    eu-west-2:
+      PV64: NOT_SUPPORTED
+      HVM64: ami-886369ec
+      HVMG2: NOT_SUPPORTED
+    eu-central-1:
+      PV64: ami-6527cf0a
+      HVM64: ami-ea26ce85
+      HVMG2: ami-81ac71ee
+    ap-northeast-1:
+      PV64: ami-3e42b65f
+      HVM64: ami-374db956
+      HVMG2: ami-46220c21
+    ap-northeast-2:
+      PV64: NOT_SUPPORTED
+      HVM64: ami-2b408b45
+      HVMG2: NOT_SUPPORTED
+    ap-southeast-1:
+      PV64: ami-df9e4cbc
+      HVM64: ami-a59b49c6
+      HVMG2: ami-c212aba1
+    ap-southeast-2:
+      PV64: ami-63351d00
+      HVM64: ami-dc361ebf
+      HVMG2: ami-0ad2db69
+    ap-south-1:
+      PV64: NOT_SUPPORTED
+      HVM64: ami-ffbdd790
+      HVMG2: ami-ca3042a5
+    us-east-2:
+      PV64: NOT_SUPPORTED
+      HVM64: ami-f6035893
+      HVMG2: NOT_SUPPORTED
+    ca-central-1:
+      PV64: NOT_SUPPORTED
+      HVM64: ami-730ebd17
+      HVMG2: NOT_SUPPORTED
+    sa-east-1:
+      PV64: ami-1ad34676
+      HVM64: ami-6dd04501
+      HVMG2: NOT_SUPPORTED
+    cn-north-1:
+      PV64: ami-77559f1a
+      HVM64: ami-8e6aa0e3
+      HVMG2: NOT_SUPPORTED
+
+Resources:
+
+  rResourceBackupBucket:
+    Type: AWS::S3::Bucket
+#Retain    
+    DeletionPolicy: Delete
+    Properties:
+      AccessControl: Private
+      BucketEncryption:
+         ServerSideEncryptionConfiguration:
+         - ServerSideEncryptionByDefault:
+             SSEAlgorithm: AES256
+
+  rNotifyProcessCompletionTopic:
+    Type: AWS::SNS::Topic
+    Condition: cCreateTopic
+    Properties:
+      TopicName: !Join ["-",["processCompletion",!Ref "AWS::AccountId",!Ref "AWS::Region"]]
+      Subscription:
+        - Endpoint: !Ref pNotifyEmail
+          Protocol: email
+      Tags:
+      - Key: Application
+        Value: !Ref 'AWS::StackName'
+      - Key: Name
+        Value: !Sub rNotifyProcessCompletionTopic
+      - Key: Owner
+        Value: ABCD
+
+  rProcessCompletionTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Condition: cCreateTopic
+    Properties:
+      PolicyDocument:
+        Id: 'TriggerSnowTopicPolicy'
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AllowPublish"
+            Effect: Allow
+            Principal:
+              Service: 'events.amazonaws.com'
+            Action:
+              - sns:GetTopicAttributes
+              - sns:ListSubscriptionsByTopic
+              - sns:Publish
+              - sns:Subscribe
+            Resource: !Ref rNotifyProcessCompletionTopic
+      Topics:
+        - !Ref rNotifyProcessCompletionTopic
+
+  rVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: Ec2 Target VPC
+
+  rInternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  rVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref rVPC
+      InternetGatewayId: !Ref rInternetGateway
+
+  rSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      #AvailabilityZone: ap-south-1a
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      VpcId: !Ref rVPC
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+
+  rRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref rVPC
+
+  rInternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: rInternetGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref rInternetGateway
+      RouteTableId: !Ref rRouteTable
+
+  SrubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref rRouteTable
+      SubnetId: !Ref rSubnetA
+
+  rInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH access via port 22
+      VpcId: !Ref rVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp:
+          Ref: pSSHLocation
+
+  rEC2FleetLaunchTemplate:
+    Type: 'AWS::EC2::LaunchTemplate'
+    Properties:
+      LaunchTemplateName: EC2Fleet-LaunchTemplate  
+      LaunchTemplateData:
+        ImageId: 
+          Fn::FindInMap:
+          - mAWSRegionArch2AMI
+          - Ref: AWS::Region
+          - Fn::FindInMap:
+            - mAWSInstanceType2Arch
+            - Ref: pInstanceType
+            - Arch
+        InstanceType: !Ref pInstanceType
+        KeyName: !Ref pKeyName
+        NetworkInterfaces:
+          - DeviceIndex: '0'
+            AssociatePublicIpAddress: true
+            DeleteOnTermination: true
+            SubnetId: !Ref rSubnetA
+            Groups:
+              - !Ref rInstanceSecurityGroup  
+        UserData: {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash\n",
+                "sudo yum -y update\n"
+              ]
+            ]
+          }
+        }
+#-e is the exit code. 0 is success. -r is reason
+        TagSpecifications:
+        - ResourceType: 'instance'
+          Tags:
+          -
+            Key: Appplication
+            Value:  Amazon Server
+          -
+            Key: Environment
+            Value: Test
+          - 
+            Key: Owner
+            Value: ABCD
+
+
+  rLaunchEC2Fleet:
+    Type: AWS::EC2::EC2Fleet
+    DependsOn: rEC2FleetLaunchTemplate
+    Properties: 
+      LaunchTemplateConfigs: 
+        - {
+            "LaunchTemplateSpecification": 
+            {
+               "Version": "$Latest",
+               "LaunchTemplateId": !Ref rEC2FleetLaunchTemplate
+            }
+          }    
+#"DefaultTargetCapacityType": "on-demand"          
+      TargetCapacitySpecification: {"DefaultTargetCapacityType": "spot", "OnDemandTargetCapacity": 5, "TotalTargetCapacity": 5 }
+      Type: "instant"
+
+  rProcessInstancesLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Join ["-", ["processInstancesLambdaExecutionRole",!Ref "AWS::AccountId", !Ref "AWS::Region"]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:PutRetentionPolicy
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/ec2Processor*'
+
+              - Effect: Allow
+                Action: 
+                  - sns:Publish
+                Resource: !Ref rNotifyProcessCompletionTopic
+              
+              - Effect: Allow
+                Action: 
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceAttribute
+                Resource: '*'
+              
+              - Effect: Allow
+                Action: 
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:PutObject"
+                Resource: !Join ["", ["arn:aws:s3:::",!Ref rResourceBackupBucket,/running-instances/*]]
+
+      Tags:
+      - Key: Application
+        Value: !Ref 'AWS::StackName'
+      - Key: Name
+        Value: "rProcessInstancesLambdaExecutionRole"
+      - Key: Owner
+        Value: ABCD
+
+  rInstanceProcessorLambda:
+    Type: "AWS::Lambda::Function"
+    DependsOn: rProcessInstancesLambdaExecutionRole
+    Description: "Check all running instances and log to s3 bucket"
+    Properties: 
+      Code:        
+        S3Bucket: !Ref pArtifactsBucketName
+        S3Key: !Ref pDeploymentPackageKey
+      Environment: 
+        Variables: 
+          backupBucket: !Ref rResourceBackupBucket
+          sns_topic: !Ref rNotifyProcessCompletionTopic
+          
+      FunctionName: ec2Processor
+      Handler: index.handler
+      Role: !GetAtt rProcessInstancesLambdaExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: "120"
+
+  rInvokeInstanceProcessorLambda:
+    Type: "Custom::ResourceBackupLambda"
+    DependsOn: 
+    - rInstanceProcessorLambda
+    - rLaunchEC2Fleet
+    Properties:
+      ServiceToken: !Sub "${rInstanceProcessorLambda.Arn}"
+      pUpdateHash: !Ref pUpdateHash
+
+Outputs:
+
+  BackupBucket:
+    Description: Bucket used to store the ec2 information
+    Value: !Ref rResourceBackupBucket

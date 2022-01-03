@@ -1,0 +1,238 @@
+--- 
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "pipeline to deploy ec2 instances and lambda to process the same"
+
+Parameters:
+
+  pApplicationName:
+    Description: This will be used to name the pipeline and build resources
+    Type: String
+    Default: process-ec2-instances
+    AllowedPattern: '[A-Za-z0-9-]+'
+
+  pSourceRepositoryName:
+    Type: String
+    Default: instancetrackingrepo
+
+  pSourceBranchName:
+    Type: String
+    Default: master
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - 
+        Label: 
+          default: Application Configuration
+        Parameters:
+          - pApplicationName
+    ParameterLabels:
+            pApplicationName: 
+                default: Application Name
+
+Resources:
+
+  rArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: rCloudFormationRole
+#Delete    
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub '${pApplicationName}-artifacts'
+
+  rCodeBuildRole:
+    Type: AWS::IAM::Role
+    DependsOn: rCloudFormationRole
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Join ["-", [!Ref pApplicationName,"CodeBuildRole",!Ref "AWS::AccountId", !Ref "AWS::Region"]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchWriteLogsPolicy
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:PutRetentionPolicy
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group*'
+              - Sid: CodeCommitPullPolicy
+                Effect: Allow
+                Action:
+                  - codecommit:GitPull
+                Resource: '*'
+              - Sid: S3GetPutObjectPolicy
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:UpdateStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:ValidateTemplate
+                  - iam:PassRole
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: "*"
+  
+  rCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: rCloudFormationRole
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        Type: LINUX_CONTAINER
+      Name: !Sub '${pApplicationName}'
+      ServiceRole: !GetAtt rCodeBuildRole.Arn
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10 
+# can be between 5 minutes to 8 hours      
+
+  rCloudFormationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  rCodePipelineRole:
+    Type: AWS::IAM::Role
+    DependsOn: rCloudFormationRole
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  rCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: S3
+        Location: !Ref rArtifactsBucket
+      Name: !Sub '${pApplicationName}'
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt rCodePipelineRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                RepositoryName: !Ref pSourceRepositoryName
+                BranchName: !Ref pSourceBranchName
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: PipelineDeploy
+          Actions:
+            - Name: CreateUpdatePipeline
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM
+                RoleArn: !GetAtt rCloudFormationRole.Arn
+                StackName: !Ref AWS::StackName
+                TemplatePath: SourceOutput::infrastructure/codepipeline.yaml
+              InputArtifacts:
+                - Name: SourceOutput
+        - Name: Build
+          Actions:
+            - Name: BuildAndTest
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref rCodeBuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+        - Name: LambdaDeploy
+          Actions:
+            - Name: CreateUpdateLambda
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM
+                RoleArn: !GetAtt rCloudFormationRole.Arn
+                StackName: !Sub '${pApplicationName}-app'
+                TemplatePath: SourceOutput::infrastructure/createec2instances.yaml
+                TemplateConfiguration: SourceOutput::config/requiredinputs.json
+                #ParameterOverrides: '{"pDeploymentPackageKey": {"Fn::GetArtifactAtt": ["BuildOutput", "ObjectKey"]}}'
+                ParameterOverrides: !Sub |
+                  {
+                    "pDeploymentPackageKey": {"Fn::GetArtifactAtt": ["BuildOutput", "ObjectKey"]},
+                    "pArtifactsBucketName": "${rArtifactsBucket}"
+                  }
+              InputArtifacts:
+                - Name: SourceOutput
+                - Name: BuildOutput
+
+Outputs:
+  oCodePipelineURL:
+    Description: The URL for the created pipeline
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${pApplicationName} 
+  oArtifactsBucket:
+    Description: S3 bucket holding all the OutputArtifacts of any pipeline stage
+    Value: !Ref rArtifactsBucket
+    Export:
+      Name: !Sub '${pApplicationName}PipelineArtifactsBucket'
